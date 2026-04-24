@@ -98,23 +98,25 @@
     </style>
 </head>
 <body>
-    <h1> Система управления дроном</h1>
-    <p>Система готова к полёту | Версия 1.0</p>
+    <h1>Система управления дроном</h1>
+    <p>Система готова к полету | Версия 1.1</p>
     
     <div class="control-panel">
         <button onclick="poleteli()">ВЗЛЕТ</button>
         <button onclick="posadka()">ПОСАДКА</button>
+        <button onclick="connectBoard()">ПОДКЛЮЧИТЬ ПЛАТУ</button>
         
         <button onclick="updateTelemetry()">ОБНОВИТЬ ДАННЫЕ</button>
-        <button onclick="updateTerrain()"> АНАЛИЗ МЕСТНОСТИ</button>
-        <button onclick="connectCamera()"> ПОДКЛЮЧИТЬ КАМЕРУ</button>
-        <button onclick="toggleCharging()"> ПОДКЛЮЧИТЬ ЗАРЯДКУ</button>
+        <button onclick="updateTerrain()">АНАЛИЗ МЕСТНОСТИ</button>
+        <button onclick="connectCamera()">ПОДКЛЮЧИТЬ КАМЕРУ</button>
+        <button onclick="toggleCharging()">ПОДКЛЮЧИТЬ ЗАРЯДКУ</button>
     </div>
     
     <div id="vysota">Высота: 0 метров</div>
+    <div id="board_status">Плата: не подключена</div>
     
     <div>Заряд: <span id="charge_value">100</span>%</div>
-    <div id="charging_status"> Зарядное устройство не подключено</div>
+    <div id="charging_status">Зарядное устройство не подключено</div>
     <div style="background-color: #333; width: 200px;">
         <div id="charge_bar" style="background-color: lime; width: 100%; height: 20px;"></div>
     </div>
@@ -124,9 +126,10 @@
     <div> Сигнал радара: <span id="radar_signal">100</span>%</div>
     
     <div id="camera-container">
-        <div id="camera-label"> ТРАНСЛЯЦИЯ С КАМЕРЫ</div>
+        <div id="camera-label">ТРАНСЛЯЦИЯ С КАМЕРЫ</div>
         <div id="camera-placeholder">
-             <span id="camera-status">Ожидание подключения</span><br>
+            <video id="real-camera" autoplay playsinline muted style="display:none;"></video>
+            <span id="camera-status">Ожидание подключения</span><br>
             <span style="font-size: 12px;">(При подключении к плате здесь появится видео)</span>
         </div>
     </div>
@@ -135,11 +138,121 @@
         let currentVysota = 0;
         let currentCharge = 100;
         let isCharging = false;
+        let isBoardConnected = false;
         let chargingInterval = null;
+        let telemetryInterval = null;
+        let cameraStream = null;
+        let ws = null;
+
+        const MAX_HEIGHT = 120;
+        const MIN_TAKEOFF_CHARGE = 15;
+
+        function setBoardStatus(text, color) {
+            const status = document.getElementById("board_status");
+            status.innerText = "Плата: " + text;
+            status.style.color = color;
+        }
+
+        function updateBatteryUI() {
+            document.getElementById("charge_value").innerText = currentCharge;
+            document.getElementById("charge_bar").style.width = currentCharge + "%";
+            if (currentCharge < 20) {
+                document.getElementById("charge_bar").style.backgroundColor = "red";
+            } else if (currentCharge < 50) {
+                document.getElementById("charge_bar").style.backgroundColor = "orange";
+            } else {
+                document.getElementById("charge_bar").style.backgroundColor = "lime";
+            }
+        }
+
+        function connectBoard() {
+            if (isBoardConnected) {
+                alert("Плата уже подключена.");
+                return;
+            }
+
+            setBoardStatus("подключение...", "#0ff0ff");
+
+            // Для локальной проверки можно поднять WS-сервис платы на ws://localhost:8080
+            try {
+                ws = new WebSocket("ws://localhost:8080");
+                ws.onopen = function() {
+                    isBoardConnected = true;
+                    setBoardStatus("подключена (WS)", "lime");
+                    startTelemetryLoop();
+                };
+
+                ws.onmessage = function(event) {
+                    try {
+                        const data = JSON.parse(event.data);
+                        applyBoardData(data);
+                    } catch (err) {
+                        console.warn("Некорректные данные от платы:", err);
+                    }
+                };
+
+                ws.onclose = function() {
+                    isBoardConnected = false;
+                    setBoardStatus("отключена", "#ff6600");
+                    stopTelemetryLoop();
+                };
+
+                ws.onerror = function() {
+                    fallbackBoardConnect();
+                };
+            } catch (error) {
+                fallbackBoardConnect();
+            }
+        }
+
+        function fallbackBoardConnect() {
+            // Режим эмуляции, если реальная плата или WS недоступны
+            setTimeout(function() {
+                isBoardConnected = true;
+                setBoardStatus("подключена (эмуляция)", "#0ff0ff");
+                startTelemetryLoop();
+            }, 900);
+        }
+
+        function applyBoardData(data) {
+            if (typeof data.temperature === "number") {
+                document.getElementById("temperature").innerText = "Температура: " + Math.floor(data.temperature) + "°C";
+            }
+            if (typeof data.radar === "number") {
+                updateRadarSignal(data.radar);
+            }
+            if (typeof data.charge === "number") {
+                currentCharge = Math.max(0, Math.min(100, Math.floor(data.charge)));
+                updateBatteryUI();
+            }
+        }
+
+        function startTelemetryLoop() {
+            stopTelemetryLoop();
+            telemetryInterval = setInterval(function() {
+                updateTelemetry();
+                updateTerrain();
+            }, 1500);
+        }
+
+        function stopTelemetryLoop() {
+            if (telemetryInterval) {
+                clearInterval(telemetryInterval);
+                telemetryInterval = null;
+            }
+        }
 
         function poleteli() {
-            if (currentCharge <= 0) {
-                alert("Заряд 0%! Дрон не взлетит!");
+            if (!isBoardConnected) {
+                alert("Сначала подключите плату.");
+                return;
+            }
+            if (currentCharge < MIN_TAKEOFF_CHARGE) {
+                alert("Недостаточный заряд для взлета (минимум " + MIN_TAKEOFF_CHARGE + "%).");
+                return;
+            }
+            if (currentVysota >= MAX_HEIGHT) {
+                alert("Достигнут лимит высоты: " + MAX_HEIGHT + " м.");
                 return;
             }
             currentVysota = currentVysota + 1;
@@ -156,12 +269,14 @@
         function razryad() {
             currentCharge = currentCharge - 10;
             if (currentCharge < 0) currentCharge = 0;
-            document.getElementById("charge_value").innerText = currentCharge;
-            document.getElementById("charge_bar").style.width = currentCharge + "%";
+            updateBatteryUI();
         }
 
         function updateTelemetry() {
-            let temp = Math.random() * 50;
+            if (!isBoardConnected) {
+                return;
+            }
+            let temp = 20 + Math.random() * 30;
             document.getElementById("temperature").innerText = "Температура: " + Math.floor(temp) + "°C";
         }
 
@@ -174,27 +289,56 @@
             let randomTerrain = terrainTypes[Math.floor(Math.random() * terrainTypes.length)];
             let signalStrength = Math.floor(Math.random() * 100);
             
-            document.getElementById("terrain").innerHTML = " Местность: " + randomTerrain;
-            document.getElementById("radar_signal").innerText = signalStrength;
-            
+            document.getElementById("terrain").innerText = "Местность: " + randomTerrain;
+            updateRadarSignal(signalStrength);
+        }
+
+        function updateRadarSignal(signalStrength) {
+            const radar = document.getElementById("radar_signal");
+            radar.innerText = signalStrength;
+
             if (signalStrength < 30) {
-                document.getElementById("radar_signal").style.color = "red";
+                radar.style.color = "red";
             } else if (signalStrength < 70) {
-                document.getElementById("radar_signal").style.color = "orange";
+                radar.style.color = "orange";
             } else {
-                document.getElementById("radar_signal").style.color = "lime";
+                radar.style.color = "lime";
             }
         }
 
-        function connectCamera() {
-            let statusElem = document.getElementById("camera-status");
-            statusElem.innerHTML = " Запрос доступа к камере...";
-            
-            setTimeout(() => {
-                statusElem.innerHTML = " Камера готова (эмуляция)";
-                let placeholder = document.getElementById("camera-placeholder");
-                placeholder.innerHTML = " <span id='camera-status'>Режим эмуляции. При подключении платы здесь будет видео.</span>";
-            }, 1500);
+        async function connectCamera() {
+            const statusElem = document.getElementById("camera-status");
+            const videoElem = document.getElementById("real-camera");
+
+            if (!isBoardConnected) {
+                alert("Сначала подключите плату, затем камеру.");
+                return;
+            }
+
+            statusElem.innerText = "Запрос доступа к камере...";
+
+            try {
+                if (cameraStream) {
+                    cameraStream.getTracks().forEach(track => track.stop());
+                }
+
+                cameraStream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    },
+                    audio: false
+                });
+
+                videoElem.srcObject = cameraStream;
+                videoElem.style.display = "block";
+                statusElem.innerText = "Камера подключена";
+                statusElem.style.color = "lime";
+            } catch (error) {
+                statusElem.innerText = "Ошибка доступа к камере";
+                statusElem.style.color = "red";
+                console.error("Не удалось подключить камеру:", error);
+            }
         }
 
         function startCharging() {
@@ -209,7 +353,7 @@
             }
             
             isCharging = true;
-            document.getElementById("charging_status").innerHTML = "🔌 ИДЁТ ЗАРЯДКА... 🔌";
+            document.getElementById("charging_status").innerText = "ИДЕТ ЗАРЯДКА...";
             document.getElementById("charging_status").style.color = "#0ff0ff";
             
             chargingInterval = setInterval(function() {
@@ -217,8 +361,7 @@
                     currentCharge = currentCharge + 5;
                     if (currentCharge > 100) currentCharge = 100;
                     
-                    document.getElementById("charge_value").innerText = currentCharge;
-                    document.getElementById("charge_bar").style.width = currentCharge + "%";
+                    updateBatteryUI();
                     
                     if (currentCharge >= 100) {
                         stopCharging();
@@ -236,11 +379,11 @@
                 chargingInterval = null;
             }
             isCharging = false;
-            document.getElementById("charging_status").innerHTML = "⚡ ЗАРЯДНОЕ УСТРОЙСТВО ОТКЛЮЧЕНО ⚡";
+            document.getElementById("charging_status").innerText = "ЗАРЯДНОЕ УСТРОЙСТВО ОТКЛЮЧЕНО";
             document.getElementById("charging_status").style.color = "#ff6600";
             
             setTimeout(function() {
-                document.getElementById("charging_status").innerHTML = "🔌 Зарядное устройство не подключено";
+                document.getElementById("charging_status").innerText = "Зарядное устройство не подключено";
                 document.getElementById("charging_status").style.color = "#888";
             }, 2000);
         }
@@ -252,6 +395,17 @@
                 startCharging();
             }
         }
+
+        window.addEventListener("beforeunload", function() {
+            if (chargingInterval) clearInterval(chargingInterval);
+            if (telemetryInterval) clearInterval(telemetryInterval);
+            if (cameraStream) {
+                cameraStream.getTracks().forEach(track => track.stop());
+            }
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.close();
+            }
+        });
     </script>
 </body>
 </html>
